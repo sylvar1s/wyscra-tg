@@ -35,6 +35,8 @@ export interface ClientOptions {
   apiHash: string;
   /** Session: file name (default "wyscra"), `new StringSession(str)`, `new MemorySession()` or your own storage. */
   session?: string | SessionStorage;
+  /** Encrypts the session file (AES-256-GCM) when `session` is a file name. Strongly recommended for user accounts. */
+  sessionPassword?: string;
   testServers?: boolean;
   ipv6?: boolean;
   proxy?: ProxyOptions;
@@ -153,7 +155,7 @@ export class TelegramClient extends EventEmitter {
     super();
     if (!options.apiId || !options.apiHash) throw new Error('apiId and apiHash are required (get them at https://my.telegram.org)');
     const s = options.session ?? 'wyscra';
-    this.storage = typeof s === 'string' ? new FileSession(s) : s;
+    this.storage = typeof s === 'string' ? new FileSession(s, { password: options.sessionPassword }) : s;
     const make = (path: string): any =>
       new Proxy(function () {}, {
         get: (_t, key) => (typeof key === 'string' && key !== 'then' ? make(path ? `${path}.${key}` : key) : undefined),
@@ -288,9 +290,12 @@ export class TelegramClient extends EventEmitter {
     this.save(true);
   }
 
-  /** Session as a portable string (store it in an env var and pass `new StringSession(str)`). */
-  exportSession(): string {
-    return StringSession.encode(this.session);
+  /**
+   * Session as a portable string (store it in an env var and pass `new StringSession(str)`).
+   * With `password` the string is encrypted; load it with `new StringSession(str, { password })`.
+   */
+  exportSession(password?: string): string {
+    return StringSession.encode(this.session, password);
   }
 
   // ======================= calling methods =======================

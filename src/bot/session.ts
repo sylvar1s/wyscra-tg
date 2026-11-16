@@ -1,4 +1,4 @@
-import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { readJsonFile, writeFileAtomic } from '../db/drivers.js';
 import type { Middleware } from './composer.js';
 import { conversationKey, type Context, type SessionData } from './context.js';
 
@@ -37,11 +37,7 @@ export class FileStore<T = SessionData> implements SessionStore<T> {
     private readonly path = 'sessions.json',
     private readonly debounceMs = 500,
   ) {
-    try {
-      this.data = JSON.parse(readFileSync(path, 'utf8'));
-    } catch {
-      this.data = {};
-    }
+    this.data = readJsonFile(path, 'Файл сессий') ?? {};
     process.once('exit', () => this.flush());
   }
   get(key: string): T | undefined {
@@ -63,8 +59,7 @@ export class FileStore<T = SessionData> implements SessionStore<T> {
     if (!this.timer) return;
     clearTimeout(this.timer);
     this.timer = undefined;
-    writeFileSync(this.path + '.tmp', JSON.stringify(this.data));
-    renameSync(this.path + '.tmp', this.path);
+    writeFileAtomic(this.path, JSON.stringify(this.data));
   }
 }
 

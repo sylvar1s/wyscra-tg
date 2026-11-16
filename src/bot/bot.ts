@@ -141,6 +141,9 @@ export class Bot<C extends Context = Context> extends Composer<C> implements Con
   private drained?: () => void;
   private polling?: AbortController;
   private pollLoop?: Promise<void>;
+  /** Polled update ids whose handlers haven't finished (they pin the acknowledged offset). */
+  private readonly pending = new Set<number>();
+  private maxSeen = -1;
   private server?: Server;
   private readonly options: BotOptions;
   /** База данных бота (см. опцию `db`). */
@@ -654,10 +657,21 @@ export class Bot<C extends Context = Context> extends Composer<C> implements Con
     await this.printDb();
   }
 
+  /**
+   * Offset that acknowledges only fully processed updates: the oldest update still being handled
+   * (Telegram keeps it and everything after it), or the next id when nothing is in progress.
+   */
+  private ackOffset(): number {
+    if (this.maxSeen < 0) return 0;
+    let min = this.maxSeen + 1;
+    for (const id of this.pending) if (id < min) min = id;
+    return min;
+  }
+
   private async poll(signal: AbortSignal, o: PollingOptions): Promise<void> {
     const allowed = o.allowedUpdates ?? UPDATE_TYPES;
     const concurrency = o.concurrency ?? 500;
-    let offset = 0;
+    let skipTo = 0;
     let backoff = 0;
     while (!signal.aborted) {
       if (this.inFlight >= concurrency) {
@@ -665,15 +679,25 @@ export class Bot<C extends Context = Context> extends Composer<C> implements Con
         continue;
       }
       try {
+        const offset = skipTo || this.ackOffset();
+        skipTo = 0;
         const updates = await this.api.getUpdates(
           { offset, limit: o.limit ?? 100, timeout: o.timeout ?? 30, allowed_updates: allowed as UpdateType[] },
           { signal },
         );
         backoff = 0;
+        let fresh = 0;
         for (const u of updates) {
-          offset = u.update_id + 1;
-          this.enqueue(u);
+          // Updates at or below maxSeen are redeliveries of ones we hold back (in progress or done).
+          if (u.update_id <= this.maxSeen) continue;
+          this.maxSeen = u.update_id;
+          fresh++;
+          this.pending.add(u.update_id);
+          void this.enqueue(u).finally(() => this.pending.delete(u.update_id));
         }
+        // A batch of nothing but redeliveries means a slow handler is pinning the offset and Telegram
+        // would keep answering instantly: acknowledge past it once instead of spinning.
+        if (updates.length && !fresh) skipTo = this.maxSeen + 1;
       } catch (err) {
         if (signal.aborted) break;
         if (err instanceof TelegramError && (err.code === 401 || err.code === 409)) {
@@ -689,8 +713,6 @@ export class Bot<C extends Context = Context> extends Composer<C> implements Con
         await new Promise((r) => setTimeout(r, backoff));
       }
     }
-    // Confirm the last offset so processed updates are not delivered again after restart.
-    if (offset) await this.api.getUpdates({ offset, limit: 1, timeout: 0 }).catch(() => {});
   }
 
   /** Stops polling / webhook server and waits for running handlers to finish. */
@@ -704,6 +726,8 @@ export class Bot<C extends Context = Context> extends Composer<C> implements Con
     this.server = undefined;
     this.scheduler.stopAll();
     await Promise.all(this.queues.values());
+    // Acknowledge only now that handlers have finished: if the process dies earlier, Telegram redelivers.
+    if (polling && this.maxSeen >= 0) await this.api.getUpdates({ offset: this.ackOffset(), limit: 1, timeout: 0 }).catch(() => {});
     await this.db.close().catch(() => {});
   }
 

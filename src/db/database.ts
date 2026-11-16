@@ -1,4 +1,4 @@
-import { connectDriver, type Driver, type Filter } from './drivers.js';
+import { connectDriver, matchesFilter, splitFilter, type Driver, type Filter } from './drivers.js';
 
 type Id = string | number | bigint;
 /** Запись коллекции: ваши поля + id. */
@@ -45,23 +45,33 @@ export class Collection<T extends object = Record<string, any>> {
   }
 
   /**
-   * Меняет только указанные поля (если записи нет — создаёт).
-   * Можно передать функцию: `update(id, u => ({ balance: u.balance + 10 }))`.
+   * Меняет только указанные поля (если записи нет — создаёт). Атомарно: одновременные `update`/`increment`
+   * одной записи не затирают друг друга (в SQL — транзакция с блокировкой строки, в Mongo/Redis — compare-and-swap).
+   * Можно передать функцию: `update(id, u => ({ balance: u.balance + 10 }))` — она может вызываться
+   * повторно при конфликте, поэтому не делайте в ней побочных действий (отправку сообщений и т.п.).
    */
   async update(id: Id, patch: Partial<T> | ((current: Doc<T> | undefined) => Partial<T>)): Promise<Doc<T>> {
-    const current = await this.get(id);
-    const changes = typeof patch === 'function' ? patch(current) : patch;
-    return this.set(id, { ...(current ?? {}), ...changes } as T);
+    const key = this.key(id);
+    const apply = (raw: any): Doc<T> => {
+      const current = raw == null ? undefined : this.doc(key, raw);
+      const changes = typeof patch === 'function' ? patch(current) : patch;
+      const merged: any = { ...(current ?? {}), ...changes };
+      return this.doc(key, { ...merged, id: merged.id ?? id });
+    };
+    const d = await this.db.driver();
+    if (d.update) return d.update(this.name, key, apply);
+    // Свой драйвер без атомарного update: хотя бы внутри процесса изменения одной записи идут по очереди.
+    return this.db.withLock(`${this.name}\0${key}`, async () => {
+      const next = apply(await d.get(this.name, key));
+      await d.set(this.name, key, next);
+      return next;
+    });
   }
 
   /** Увеличивает числовое поле: `increment(userId, 'balance', 100)`. Возвращает новое значение. */
   async increment(id: Id, field: keyof T & string, by = 1): Promise<number> {
-    let value = 0;
-    await this.update(id, (cur) => {
-      value = Number((cur as any)?.[field] ?? 0) + by;
-      return { [field]: value } as Partial<T>;
-    });
-    return value;
+    const doc = await this.update(id, (cur) => ({ [field]: Number((cur as any)?.[field] ?? 0) + by }) as Partial<T>);
+    return (doc as any)[field];
   }
 
   /** Удаляет запись. */
@@ -75,7 +85,9 @@ export class Collection<T extends object = Record<string, any>> {
   }
 
   /**
-   * Поиск: объект `{ поле: значение }` (выполняется в самой БД) или функция-условие.
+   * Поиск: объект `{ поле: значение }` или функция-условие.
+   * Объект работает одинаково во всех базах: точное равенство, `null` — «null или поля нет»,
+   * объекты и массивы сравниваются целиком. Простые значения проверяются в самой БД.
    * ```ts
    * await users.find({ city: 'Москва' });
    * await users.find(u => u.balance > 1000);
@@ -83,16 +95,22 @@ export class Collection<T extends object = Record<string, any>> {
    */
   async find(filter?: Partial<T> | ((doc: Doc<T>) => unknown), limit?: number): Promise<Array<Doc<T>>> {
     const d = await this.db.driver();
-    if (typeof filter === 'function') {
-      const out: Array<Doc<T>> = [];
-      for (const [k, v] of await d.list(this.name)) {
-        const doc = this.doc(k, v);
-        if (filter(doc)) out.push(doc);
-        if (limit && out.length >= limit) break;
-      }
-      return out;
+    let test: ((doc: Doc<T>) => unknown) | undefined;
+    let simple: Filter | undefined;
+    if (typeof filter === 'function') test = filter;
+    else {
+      const parts = splitFilter(filter as Filter | undefined);
+      simple = parts.simple;
+      if (parts.complex) test = (doc) => matchesFilter(doc, parts.complex);
     }
-    return (await d.list(this.name, filter as Filter | undefined, limit)).map(([k, v]) => this.doc(k, v));
+    if (!test) return (await d.list(this.name, simple, limit)).map(([k, v]) => this.doc(k, v));
+    const out: Array<Doc<T>> = [];
+    for (const [k, v] of await d.list(this.name, simple)) {
+      const doc = this.doc(k, v);
+      if (test(doc)) out.push(doc);
+      if (limit && out.length >= limit) break;
+    }
+    return out;
   }
 
   /** Первая подходящая запись. */
@@ -102,7 +120,9 @@ export class Collection<T extends object = Record<string, any>> {
 
   /** Количество записей (с фильтром или без). */
   async count(filter?: Partial<T>): Promise<number> {
-    return (await this.db.driver()).count(this.name, filter as Filter | undefined);
+    const { simple, complex } = splitFilter(filter as Filter | undefined);
+    if (complex) return (await this.find(filter)).length;
+    return (await this.db.driver()).count(this.name, simple);
   }
 
   /** Перебор всех записей: `for await (const u of users) ...` */
@@ -152,6 +172,20 @@ export class Database {
   constructor(readonly url?: string | Driver) {
     this.users = this.collection('users');
     this.chats = this.collection('chats');
+  }
+
+  private readonly locks = new Map<string, Promise<unknown>>();
+
+  /** @internal Runs `fn` after previous holders of the same key (in-process mutex). */
+  withLock<R>(key: string, fn: () => Promise<R>): Promise<R> {
+    const prev = this.locks.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => {});
+    this.locks.set(key, tail);
+    void tail.then(() => {
+      if (this.locks.get(key) === tail) this.locks.delete(key);
+    });
+    return run;
   }
 
   /** @internal Driver once connected (lets hot paths skip an await). */

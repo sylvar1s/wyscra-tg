@@ -1,7 +1,7 @@
 export { TelegramClient, type ClientOptions, type ClientEvents, type PeerLike, type SendFileOptions, type SendMessageOptions, type StartOptions } from './client.js';
 export { Message, peerToId } from './message.js';
 export { RpcError } from './errors.js';
-export { FileSession, MemorySession, StringSession, markedId, unmarkId, type SessionData, type SessionStorage, type CachedPeer } from './session.js';
+export { FileSession, MemorySession, StringSession, markedId, unmarkId, type SessionEncryption, type SessionData, type SessionStorage, type CachedPeer } from './session.js';
 export { parseHtml } from './html.js';
 export { LAYER } from './generated/schema.js';
 export type { ProxyOptions } from './transport.js';
