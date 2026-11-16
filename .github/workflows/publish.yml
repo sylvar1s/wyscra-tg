@@ -1,14 +1,15 @@
 name: Publish to npm
 
-# Публикация: создайте Release на GitHub с тегом вида v0.1.0 (версия должна совпадать с package.json).
-# Один раз добавьте секрет NPM_TOKEN: Settings → Secrets and variables → Actions → New repository secret.
+# Публикация: создайте Release на GitHub с тегом вида v0.2.0 (версия должна совпадать с package.json).
+# Токен не нужен: пакет публикуется через npm Trusted Publishing (OIDC).
+# На npmjs.com в настройках пакета подключён доверенный издатель sylvar1s/wyscra-tg → publish.yml.
 on:
   release:
     types: [published]
 
 permissions:
   contents: read
-  id-token: write # npm provenance
+  id-token: write # нужно для Trusted Publishing и provenance
 
 jobs:
   publish:
@@ -20,6 +21,8 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           cache: npm
+      - name: Update npm (Trusted Publishing needs npm 11.5.1+)
+        run: npm install -g npm@latest
       - run: npm ci
       - name: Check version matches tag
         run: |
@@ -27,6 +30,4 @@ jobs:
           PKG=$(node -p "require('./package.json').version")
           if [ "$TAG" != "$PKG" ]; then echo "Тег $GITHUB_REF_NAME не совпадает с версией в package.json ($PKG)"; exit 1; fi
       - run: npm test
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --access public
