@@ -10,36 +10,65 @@ import { startMock, textUpdate, until, wait } from './mock-server.mjs';
 const dir = mkdtempSync(join(tmpdir(), 'wyscra-rel-'));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
+// The mock behaves like Telegram: an update stays until a later offset confirms it, and comes back otherwise.
+// A "crash" is simulated by aborting the bot's polling without stop(): its handlers never finish and nothing more is acknowledged.
+const crash = (bot) => bot['polling'].abort();
+const replies = (mock, text) => mock.calls.filter((c) => c.method === 'sendMessage' && c.params.text === text).length;
+
 describe('polling acknowledges only finished updates', () => {
-  test('offset stays on an update whose handler is still running', async () => {
+  test('crash during a handler: Telegram redelivers the unconfirmed update', async () => {
     const mock = await startMock();
-    const bot = new Bot('1:x', { throttle: false, apiRoot: mock.root });
-    let release;
-    const gate = new Promise((r) => (release = r));
-    bot.command('slow', async (ctx) => {
-      await gate;
-      await ctx.reply('slow done');
+    const db = join(dir, 'redeliver.db');
+    const bot1 = new Bot({ token: '1:x', throttle: false, apiRoot: mock.root, db });
+    bot1.command('slow', () => {
+      crash(bot1); // the process "dies" while this handler is running
+      return new Promise(() => {});
     });
-    bot.on('text', (ctx) => ctx.reply(`echo ${ctx.text}`));
-    await bot.start({ handleSignals: false, timeout: 1 });
+    await bot1.start({ handleSignals: false, timeout: 1 });
+    const slow = textUpdate('/slow', { chat: 1 });
+    mock.push(slow);
+    await until(() => bot1['polling']?.signal.aborted);
+    await bot1['pollLoop'];
+    assert.ok(mock.unconfirmed.includes(slow.update_id), 'update must not be confirmed while its handler runs');
+
+    const bot2 = new Bot({ token: '1:x', throttle: false, apiRoot: mock.root, db });
+    bot2.command('slow', (ctx) => ctx.reply('slow done'));
+    await bot2.start({ handleSignals: false, timeout: 1 });
+    await until(() => replies(mock, 'slow done') === 1);
+    await bot2.stop();
+    await bot1.db.close(); // release the "dead" process's file handle (Windows can't delete open files)
+    assert.ok(mock.acked.includes(slow.update_id));
+    await mock.close();
+  });
+
+  test('slow first handler, fast ones after it, crash: nothing is lost, nothing runs twice', async () => {
+    const mock = await startMock();
+    const db = join(dir, 'parked.db');
+    const bot1 = new Bot({ token: '1:x', throttle: false, apiRoot: mock.root, db });
+    bot1.command('slow', () => new Promise(() => {})); // never finishes
+    bot1.on('text', (ctx) => ctx.reply(`echo ${ctx.text}`));
+    // limit 2: the slow update plus one more fills Telegram's window, so the bot must park it to make progress.
+    await bot1.start({ handleSignals: false, timeout: 1, limit: 2 });
 
     const slow = textUpdate('/slow', { chat: 1 });
-    const fast = textUpdate('fast', { chat: 2 });
-    mock.push(slow, fast);
-    await until(() => mock.calls.some((c) => c.params.text === 'echo fast'));
-    const fast2 = textUpdate('fast2', { chat: 3 });
-    mock.push(fast2);
-    await until(() => mock.calls.some((c) => c.params.text === 'echo fast2'));
-    const polls = () => mock.calls.filter((c) => c.method === 'getUpdates').map((c) => c.params.offset);
-    await until(() => polls().length >= 4);
-    // While /slow runs, nothing at or after it may be acknowledged.
-    for (const o of polls()) assert.ok(o <= slow.update_id, `offset ${o} would drop update ${slow.update_id}`);
+    const fast = [1, 2, 3, 4, 5].map((i) => textUpdate(`fast${i}`, { chat: 10 + i }));
+    mock.push(slow, ...fast);
+    await until(() => fast.every((u) => replies(mock, `echo ${u.message.text}`) === 1));
+    // The bot did not stall behind the slow handler, and moved the offset past it only after saving it.
+    await until(() => mock.acked.includes(slow.update_id));
+    assert.ok(await bot1.db.collection('wyscra_updates_1').has(slow.update_id), 'slow update is parked in the database');
+    crash(bot1);
+    await bot1['pollLoop'];
 
-    release();
-    await until(() => mock.calls.some((c) => c.params.text === 'slow done'));
-    const before = mock.calls.length;
-    await until(() => mock.calls.slice(before).some((c) => c.method === 'getUpdates' && c.params.offset === fast2.update_id + 1));
-    await bot.stop();
+    const bot2 = new Bot({ token: '1:x', throttle: false, apiRoot: mock.root, db });
+    bot2.command('slow', (ctx) => ctx.reply('slow done'));
+    bot2.on('text', (ctx) => ctx.reply(`echo ${ctx.text}`));
+    await bot2.start({ handleSignals: false, timeout: 1, limit: 2 });
+    await until(() => replies(mock, 'slow done') === 1);
+    await until(async () => !(await bot2.db.collection('wyscra_updates_1').has(slow.update_id)));
+    await bot2.stop();
+    await bot1.db.close();
+    for (const u of fast) assert.equal(replies(mock, `echo ${u.message.text}`), 1, `${u.message.text} handled exactly once`);
     await mock.close();
   });
 

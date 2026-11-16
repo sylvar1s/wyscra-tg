@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 export async function startMock(handlers = {}) {
   const calls = [];
   const updates = [];
+  const acked = [];
   let waiting = null;
   const server = createServer(async (req, res) => {
     const chunks = [];
@@ -26,11 +27,17 @@ export async function startMock(handlers = {}) {
     const reply = (obj) => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(obj));
 
     if (method === 'getUpdates') {
-      if (updates.length) return reply({ ok: true, result: updates.splice(0) });
+      // Telegram semantics: a positive offset confirms (forgets) every update below it; updates at or above it
+      // are returned again until confirmed, `limit` at a time.
+      const offset = Number(params.offset ?? 0);
+      if (offset > 0) while (updates.length && updates[0].update_id < offset) acked.push(updates.shift().update_id);
+      const limit = Number(params.limit ?? 100);
+      const batch = () => updates.slice(0, limit);
+      if (updates.length) return reply({ ok: true, result: batch() });
       const timeout = Number(params.timeout ?? 0) * 1000;
       if (!timeout) return reply({ ok: true, result: [] });
       const t = setTimeout(() => ((waiting = null), reply({ ok: true, result: [] })), Math.min(timeout, 300));
-      waiting = () => (clearTimeout(t), (waiting = null), reply({ ok: true, result: updates.splice(0) }));
+      waiting = () => (clearTimeout(t), (waiting = null), reply({ ok: true, result: batch() }));
       return;
     }
     const h = handlers[method];
@@ -49,8 +56,15 @@ export async function startMock(handlers = {}) {
   return {
     root,
     calls,
+    /** Update ids Telegram has forgotten because a later offset confirmed them. */
+    acked,
+    /** Updates still held by "Telegram" (not confirmed yet). */
+    get unconfirmed() {
+      return updates.map((u) => u.update_id);
+    },
     push(...u) {
       updates.push(...u);
+      updates.sort((a, b) => a.update_id - b.update_id);
       waiting?.();
     },
     close: () => new Promise((r) => (server.closeAllConnections(), server.close(r))),
@@ -82,7 +96,7 @@ export const callbackUpdate = (data, { chat = 10, user = 20 } = {}) => ({
 export const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 export async function until(pred, ms = 3000) {
   const end = Date.now() + ms;
-  while (!pred()) {
+  while (!(await pred())) {
     if (Date.now() > end) throw new Error('until(): timed out');
     await wait(10);
   }

@@ -141,8 +141,10 @@ export class Bot<C extends Context = Context> extends Composer<C> implements Con
   private drained?: () => void;
   private polling?: AbortController;
   private pollLoop?: Promise<void>;
-  /** Polled update ids whose handlers haven't finished (they pin the acknowledged offset). */
-  private readonly pending = new Set<number>();
+  /** Polled updates whose handlers haven't finished (they pin the acknowledged offset unless parked). */
+  private readonly pending = new Map<number, Update>();
+  /** Pending updates saved to the database, so the offset may move past them. */
+  private readonly parked = new Set<number>();
   private maxSeen = -1;
   private server?: Server;
   private readonly options: BotOptions;
@@ -652,26 +654,76 @@ export class Bot<C extends Context = Context> extends Composer<C> implements Con
     await this.syncCommands();
     const controller = (this.polling = new AbortController());
     if (options.handleSignals ?? true) this.handleSignals();
+    await this.replayParked(options.dropPendingUpdates ?? false);
     this.pollLoop = this.poll(controller.signal, options);
     printStatus(`Бот @${this.me.username} запущен (long polling)`);
     await this.printDb();
   }
 
   /**
-   * Offset that acknowledges only fully processed updates: the oldest update still being handled
-   * (Telegram keeps it and everything after it), or the next id when nothing is in progress.
+   * Offset that acknowledges only updates that are safe to forget: the oldest update still being handled
+   * and not yet parked in the database (Telegram keeps it and everything after it), or the next id.
    */
   private ackOffset(): number {
     if (this.maxSeen < 0) return 0;
     let min = this.maxSeen + 1;
-    for (const id of this.pending) if (id < min) min = id;
+    for (const id of this.pending.keys()) if (id < min && !this.parked.has(id)) min = id;
     return min;
+  }
+
+  /** Where unfinished updates wait when the offset has to move past them (survives a crash with a persistent db). */
+  private inbox() {
+    return this.db.collection<{ update: Update }>(`wyscra_updates_${this.me.id}`);
+  }
+
+  /** Runs an update and tracks it until its handler finishes. */
+  private track(u: Update): void {
+    this.pending.set(u.update_id, u);
+    void this.enqueue(u).finally(() => {
+      this.pending.delete(u.update_id);
+      if (this.parked.delete(u.update_id)) {
+        this.inbox().delete(u.update_id).catch((e) => console.warn('[wyscra-tg] Не удалось убрать апдейт из очереди:', e));
+      }
+    });
+  }
+
+  /**
+   * Telegram only returns updates from the offset on, `limit` at a time. When a slow handler (a long `ctx.ask`,
+   * a stuck request) pins the offset and the window fills with updates we already have, we can neither
+   * acknowledge it (it would be lost on a crash) nor wait (the bot would stall). So unfinished updates are
+   * written to the database first, and only then acknowledged; `replayParked` runs them again after a restart.
+   */
+  private async parkPending(): Promise<void> {
+    for (const [id, update] of this.pending) {
+      if (this.parked.has(id)) continue;
+      await this.inbox().set(id, { update });
+      // The handler may have finished while we were writing: then the record is not needed.
+      if (this.pending.has(id)) this.parked.add(id);
+      else await this.inbox().delete(id);
+    }
+  }
+
+  /** Re-runs updates parked before a crash. */
+  private async replayParked(drop: boolean): Promise<void> {
+    const inbox = this.inbox();
+    const left = await inbox.all();
+    if (!left.length) return;
+    if (drop) {
+      for (const r of left) await inbox.delete(r.id);
+      return;
+    }
+    printStatus(`Необработанных апдейтов с прошлого запуска: ${left.length} — обрабатываю заново`);
+    for (const { update } of left.sort((a, b) => a.update.update_id - b.update.update_id)) {
+      // Everything up to the newest parked id was either finished or parked, so Telegram's copies are duplicates.
+      this.maxSeen = Math.max(this.maxSeen, update.update_id);
+      this.parked.add(update.update_id);
+      this.track(update);
+    }
   }
 
   private async poll(signal: AbortSignal, o: PollingOptions): Promise<void> {
     const allowed = o.allowedUpdates ?? UPDATE_TYPES;
     const concurrency = o.concurrency ?? 500;
-    let skipTo = 0;
     let backoff = 0;
     while (!signal.aborted) {
       if (this.inFlight >= concurrency) {
@@ -679,10 +731,8 @@ export class Bot<C extends Context = Context> extends Composer<C> implements Con
         continue;
       }
       try {
-        const offset = skipTo || this.ackOffset();
-        skipTo = 0;
         const updates = await this.api.getUpdates(
-          { offset, limit: o.limit ?? 100, timeout: o.timeout ?? 30, allowed_updates: allowed as UpdateType[] },
+          { offset: this.ackOffset(), limit: o.limit ?? 100, timeout: o.timeout ?? 30, allowed_updates: allowed as UpdateType[] },
           { signal },
         );
         backoff = 0;
@@ -692,12 +742,18 @@ export class Bot<C extends Context = Context> extends Composer<C> implements Con
           if (u.update_id <= this.maxSeen) continue;
           this.maxSeen = u.update_id;
           fresh++;
-          this.pending.add(u.update_id);
-          void this.enqueue(u).finally(() => this.pending.delete(u.update_id));
+          this.track(u);
         }
-        // A batch of nothing but redeliveries means a slow handler is pinning the offset and Telegram
-        // would keep answering instantly: acknowledge past it once instead of spinning.
-        if (updates.length && !fresh) skipTo = this.maxSeen + 1;
+        // Only redeliveries: a slow handler pins the offset. Park the unfinished updates so the offset can move on.
+        if (updates.length && !fresh) {
+          try {
+            await this.parkPending();
+          } catch (e) {
+            // Without a safe copy we must not acknowledge: hold the offset and try again a bit later.
+            console.error('[wyscra-tg] Не удалось сохранить необработанные апдейты, повторю:', e);
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        }
       } catch (err) {
         if (signal.aborted) break;
         if (err instanceof TelegramError && (err.code === 401 || err.code === 409)) {

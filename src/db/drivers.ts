@@ -475,19 +475,24 @@ export async function mongoDriver(url: string): Promise<Driver> {
   const client = new (mongo.MongoClient ?? mongo.default.MongoClient)(url);
   await client.connect();
   const db = client.db();
-  // _v — служебная версия записи для атомарного update (compare-and-swap).
+  // Служебная версия записи для атомарного update (compare-and-swap); имя с префиксом, чтобы не задеть поля пользователя.
+  const REV = '__wyscra_rev';
+  // 0.2.0 хранила версию в `_v` (UUID); такие значения убираем при чтении, пользовательский `_v` не трогаем.
+  const LEGACY_REV = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const strip = (d: any) => {
-    const { _id, _v, ...rest } = d;
+    const { _id, [REV]: _rev, ...rest } = d;
+    if (_rev === undefined && typeof rest._v === 'string' && LEGACY_REV.test(rest._v)) delete rest._v;
     return rest;
   };
   const query = (f?: Filter) => {
-    const q: Record<string, unknown> = {};
+    const and: Array<Record<string, unknown>> = [];
     for (const [k, v] of Object.entries(f ?? {})) {
       checkField(k);
-      // null: отсутствует или null. Иначе — строгое равенство: { $eq } в Mongo совпадает и с массивом, содержащим значение.
-      q[k] = v === null ? null : { $eq: v, $not: { $type: 'array' } };
+      // { $eq } и { $type } в Mongo совпадают и с массивом, содержащим значение, поэтому массивы исключаем явно.
+      if (v === null) and.push({ $or: [{ [k]: { $exists: false } }, { [k]: { $type: 'null', $not: { $type: 'array' } } }] });
+      else and.push({ [k]: { $eq: v, $not: { $type: 'array' } } });
     }
-    return q;
+    return and.length ? { $and: and } : {};
   };
   return {
     name: 'mongodb',
@@ -497,14 +502,14 @@ export async function mongoDriver(url: string): Promise<Driver> {
       return d ? strip(d) : undefined;
     },
     async set(c, k, v) {
-      await db.collection(c).replaceOne({ _id: k }, { ...v, _id: k, _v: randomUUID() }, { upsert: true });
+      await db.collection(c).replaceOne({ _id: k }, { ...v, _id: k, [REV]: randomUUID() }, { upsert: true });
     },
     async update(c, k, fn) {
       const coll = db.collection(c);
       for (let i = 0; i < MAX_RETRIES; i++) {
         const d = await coll.findOne({ _id: k });
         const next = fn(d ? strip(d) : undefined);
-        const doc = { ...next, _id: k, _v: randomUUID() };
+        const doc = { ...next, _id: k, [REV]: randomUUID() };
         if (!d) {
           try {
             await coll.insertOne(doc);
@@ -514,7 +519,9 @@ export async function mongoDriver(url: string): Promise<Driver> {
             throw e;
           }
         }
-        const r = await coll.replaceOne({ _id: k, _v: d._v ?? { $exists: false } }, doc);
+        // Записи из 0.2.0 без REV сравниваем по старому `_v` (или по его отсутствию).
+        const guard = d[REV] !== undefined ? { [REV]: d[REV] } : { [REV]: { $exists: false }, _v: d._v ?? { $exists: false } };
+        const r = await coll.replaceOne({ _id: k, ...guard }, doc);
         if (r.matchedCount) return next;
       }
       throw conflict('MongoDB');

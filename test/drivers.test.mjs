@@ -71,13 +71,14 @@ for (const [kind, makeUrl] of targets) {
       await c.set('str', { v: '5', flag: 1, tags: ['a'], obj: { y: 2, x: 1 } });
       await c.set('nul', { v: null, flag: false, tags: 'a' });
       await c.set('none', { other: 1 });
+      await c.set('arrnull', { v: [null], flag: [true] });
 
       assert.deepEqual(ids(await c.find({ v: 5 })), ['num'], 'number is not equal to string');
       assert.deepEqual(ids(await c.find({ v: '5' })), ['str']);
       assert.deepEqual(ids(await c.find({ flag: true })), ['num'], 'true is not equal to 1');
       assert.deepEqual(ids(await c.find({ flag: 1 })), ['str']);
       assert.deepEqual(ids(await c.find({ flag: false })), ['nul']);
-      assert.deepEqual(ids(await c.find({ v: null })), ['none', 'nul'], 'null matches null or missing');
+      assert.deepEqual(ids(await c.find({ v: null })), ['none', 'nul'], 'null matches null or missing, not [null]');
       assert.deepEqual(ids(await c.find({ tags: 'a' })), ['nul'], 'scalar does not match an array containing it');
       assert.deepEqual(ids(await c.find({ tags: ['a'] })), ['str'], 'arrays compare whole');
       assert.deepEqual(ids(await c.find({ obj: { x: 1, y: 2 } })), ['num', 'str'], 'objects compare deeply, key order ignored');
@@ -88,6 +89,15 @@ for (const [kind, makeUrl] of targets) {
       assert.equal(await c.count({ obj: { y: 2, x: 1 } }), 2);
       assert.equal((await c.find({ v: null }, 1)).length, 1);
       assert.equal((await c.find({ obj: { x: 1, y: 2 } }, 1)).length, 1);
+    });
+
+    test('user fields with driver-like names (_v, _id-ish) are kept as is', async () => {
+      const c = coll();
+      await c.set(1, { _v: 7, v_: 'x' });
+      await c.update(1, { n: 1 });
+      await c.increment(1, 'n');
+      assert.deepEqual(await c.get(1), { _v: 7, v_: 'x', n: 2, id: 1 });
+      assert.deepEqual(ids(await c.find({ _v: 7 })), [1]);
     });
 
     test('odd field names are rejected or matched safely, never injected', async () => {
