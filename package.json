@@ -1,6 +1,6 @@
 {
   "name": "wyscra-tg",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Simple and fast Telegram bot library for Node.js: full Bot API 10.4 + MTProto, keyboards as arrays, built-in database, payments, i18n, scheduler, admin panel. Zero dependencies.",
   "author": "sylvar1s (https://github.com/sylvar1s)",
   "license": "MIT",
@@ -71,11 +71,21 @@
     "redis": ">=4"
   },
   "peerDependenciesMeta": {
-    "ioredis": { "optional": true },
-    "mongodb": { "optional": true },
-    "mysql2": { "optional": true },
-    "pg": { "optional": true },
-    "redis": { "optional": true }
+    "ioredis": {
+      "optional": true
+    },
+    "mongodb": {
+      "optional": true
+    },
+    "mysql2": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "redis": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

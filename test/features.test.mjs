@@ -16,8 +16,11 @@ describe('throttle', () => {
     await Promise.all([1, 2, 3, 4].map((i) => bot.api.sendMessage({ chat_id: 777, text: String(i) })));
     const ms = Date.now() - t;
     assert.ok(ms >= 90, `4 messages with burst 2 at 20/s should take ~100ms, took ${ms}`);
+    // The first two fit in the burst and go out as parallel HTTP requests (their arrival order may vary);
+    // the throttled ones must come strictly after them, in order.
     const order = mock.calls.filter((c) => c.params.chat_id === 777).map((c) => c.params.text);
-    assert.deepEqual(order, ['1', '2', '3', '4'], 'order is preserved');
+    assert.deepEqual(order.slice(0, 2).sort(), ['1', '2']);
+    assert.deepEqual(order.slice(2), ['3', '4'], 'throttled messages keep their order');
   });
 
   test('global limit across chats; chat actions are not throttled; paid broadcast bypasses global', async () => {
