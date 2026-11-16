@@ -65,8 +65,18 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm install --no-save pg mysql2 mongodb redis
+      # npm skips `install --no-save` for packages listed in our own peerDependencies ("up to date"),
+      # so drop them from the CI copy of package.json first.
+      - name: Install database drivers
+        run: |
+          npm pkg delete peerDependencies peerDependenciesMeta
+          npm install --no-save pg mysql2 mongodb redis
+          for p in pg mysql2 mongodb redis; do test -d "node_modules/$p" || { echo "$p was not installed"; exit 1; }; done
       - run: npm run build
       - run: node --test test/drivers.test.mjs
       - name: Same suite with ioredis instead of node-redis
-        run: npm uninstall --no-save redis && npm install --no-save ioredis && node --test --test-name-pattern=redis test/drivers.test.mjs
+        run: |
+          rm -rf node_modules/redis node_modules/@redis
+          npm install --no-save ioredis
+          test -d node_modules/ioredis && test ! -d node_modules/redis
+          node --test --test-name-pattern=redis test/drivers.test.mjs
