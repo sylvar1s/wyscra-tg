@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "paths": {
+      "wyscra-tg": ["../../dist/index.d.ts"],
+      "wyscra-tg/mtproto": ["../../dist/mtproto/index.d.ts"]
+    }
+  },
+  "include": ["."]
+}

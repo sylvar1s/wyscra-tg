@@ -1,0 +1,10 @@
+{
+  "welcome": "Hi, {name}! 👋\nI speak several languages.\n\n/apples 5 — count apples\n/language — change language",
+  "choose_language": "Choose a language:",
+  "language_changed": "Language: English 🇬🇧",
+  "apples": {
+    "one": "You have {count} apple 🍎",
+    "other": "You have {count} apples 🍎"
+  },
+  "unknown": "I don't understand 🤔 Try /start"
+}

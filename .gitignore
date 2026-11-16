@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+*.session.json
+*.session.json.tmp
+sessions.json
+*.db
+*.db-shm
+*.db-wal
+*.tgz

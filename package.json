@@ -1,0 +1,86 @@
+{
+  "name": "wyscra-tg",
+  "version": "0.1.0",
+  "description": "Simple and fast Telegram bot library for Node.js: full Bot API 10.4 + MTProto, keyboards as arrays, built-in database, payments, i18n, scheduler, admin panel. Zero dependencies.",
+  "author": "sylvar1s (https://github.com/sylvar1s)",
+  "license": "MIT",
+  "homepage": "https://github.com/sylvar1s/wyscra-tg#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sylvar1s/wyscra-tg.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sylvar1s/wyscra-tg/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./mtproto": {
+      "types": "./dist/mtproto/index.d.ts",
+      "default": "./dist/mtproto/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "wyscra-tg": "./bin/wyscra-tg.mjs"
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "generate": "node scripts/gen-bot-api.mjs && node scripts/gen-tl.mjs",
+    "update-api": "node scripts/gen-bot-api.mjs --fetch && node scripts/gen-tl.mjs --fetch && npm run build",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"test/**/*.test.mjs\"",
+    "bench": "npm run build && node test/bench-compare.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "keywords": [
+    "telegram",
+    "telegram-bot",
+    "telegram-bot-api",
+    "bot",
+    "bot-api",
+    "mtproto",
+    "userbot",
+    "telegram-client",
+    "keyboard",
+    "inline-keyboard",
+    "telegram-stars",
+    "webapp",
+    "mini-app",
+    "i18n",
+    "sqlite",
+    "typescript"
+  ],
+  "peerDependencies": {
+    "ioredis": ">=5",
+    "mongodb": ">=5",
+    "mysql2": ">=3",
+    "pg": ">=8",
+    "redis": ">=4"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": { "optional": true },
+    "mongodb": { "optional": true },
+    "mysql2": { "optional": true },
+    "pg": { "optional": true },
+    "redis": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "grammy": "^1.46.0",
+    "telegraf": "^4.16.3",
+    "typescript": "^5.6.0"
+  }
+}

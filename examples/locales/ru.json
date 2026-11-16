@@ -1,0 +1,12 @@
+{
+  "welcome": "Привет, {name}! 👋\nЯ говорю на нескольких языках.\n\n/apples 5 — посчитать яблоки\n/language — сменить язык",
+  "choose_language": "Выберите язык:",
+  "language_changed": "Язык: русский 🇷🇺",
+  "apples": {
+    "one": "У вас {count} яблоко 🍎",
+    "few": "У вас {count} яблока 🍎",
+    "many": "У вас {count} яблок 🍎",
+    "other": "У вас {count} яблока 🍎"
+  },
+  "unknown": "Не понимаю 🤔 Попробуйте /start"
+}
